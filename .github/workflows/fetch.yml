@@ -1,0 +1,59 @@
+name: fetch-blocks
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_block:
+        description: "First block number"
+        required: true
+        type: number
+      last_block:
+        description: "Last block number (chunks of at most 100)"
+        required: true
+        type: number
+      mode:
+        description: "raw = full block+receipt JSON; ledger = same JSON tagged ledger"
+        required: true
+        type: choice
+        options: [raw, ledger]
+        default: raw
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CHAIN: sonic
+      RPCS: https://rpc.soniclabs.com,https://sonic-rpc.publicnode.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch chunks and publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIRST: ${{ inputs.first_block }}
+          LAST: ${{ inputs.last_block }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import os,sys; f=int(float(os.environ["FIRST"])); l=int(float(os.environ["LAST"])); sys.exit(0 if 0 <= f <= l and l-f+1 <= 100000 else 1)'
+          TAG="data-${FIRST}-${LAST}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$CHAIN blocks ${FIRST}-${LAST}" \
+              --notes "$CHAIN public block data. Per-100-block gzip JSON with blocks (full=true) and receipts. Each asset has a .manifest.json (first/last/block_count/tx_count/bytes/sha256)."
+          f="$FIRST"
+          while [ "$f" -le "$LAST" ]; do
+            l=$((f + 99))
+            if [ "$l" -gt "$LAST" ]; then l="$LAST"; fi
+            echo "=== chunk ${f}-${l} ==="
+            sleep 2
+            python3 scripts/fetch_chunk.py --chain "$CHAIN" --first "$f" --last "$l" \
+              --out "${CHAIN}_${f}_${l}.json.gz" --mode "$MODE" --rpc-urls "$RPCS"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              "${CHAIN}_${f}_${l}.json.gz" "${CHAIN}_${f}_${l}.json.gz.manifest.json"
+            rm -f "${CHAIN}_${f}_${l}.json.gz" "${CHAIN}_${f}_${l}.json.gz.manifest.json"
+            f=$((l + 1))
+          done
